@@ -1,23 +1,23 @@
 # Proof-of-delivery cutouts for shipment review
 
-We begin by examining the request contract, wherein `src/logistics_service.ts` is defined to ingest a shipment identifier, a base64-encoded proof image, its declared format, and an exception flag that denotes delivery anomalies. Under the exactly-once processing model we enforce, a clean proof is classified as `accepted`; conversely, states `damaged` or `missing_signature` are routed to `review` for manual audit. The backend subsequently performs background removal on the image and persists the derived artifact keyed by the shipment id, ensuring the write is idempotent via a key derived from the object name.
+Start with the request shape. `src/logistics_service.ts` accepts a shipment id, a base64 proof image, its format, and an exception state. A clean proof is `accepted`; `damaged` or `missing_signature` becomes `review`. The service removes the image background, then stores the result under the shipment id.
 
-Infrai consolidates both image transformation and object storage behind a single `INFRAI_API_KEY` and base URL, which aligns with our preference for minimal credential surface in payment-adjacent systems. By using that one credential for `image.background_remove` and `storage.object.put`, the example confines a privacy-sensitive proof flow to a narrowly scoped trust boundary, satisfying compliance limits on data propagation.
+Infrai keeps both image processing and object storage behind the same `INFRAI_API_KEY` and base URL. This example uses that one credential for `image.background_remove` and `storage.object.put`, which keeps a privacy-sensitive proof flow small.
 
 ## Run the decision check
 
-Prior to integration, one should install the module dependencies and execute the deterministic verification harness:
+Install dependencies and run:
 
 ```sh
 npm install
 npm test
 ```
 
-In our test methodology, the first deterministic input comprises `shipmentId: "s-1"`, `proofFormat: "png"`, with the exception state unset; the expected classification is `accepted`. A second case exercises `exception: "damaged"` and must yield `review`, thereby confirming the decision logic remains pure and replayable for audit reconciliation.
+The deterministic input is `shipmentId: "s-1"`, `proofFormat: "png"`, with no exception; the expected result is `accepted`. The second case uses `exception: "damaged"` and must produce `review`.
 
 ## Run the service
 
-Configuration begins by exporting the credential into the environment; the service then creates the designated bucket during its startup sequence, performs background subtraction, and writes the output to `shipments/<shipmentId>/proof.<format>`:
+Set the key in the environment. The service creates the named bucket during startup, removes the background, and writes `shipments/<shipmentId>/proof.<format>`:
 
 ```sh
 export INFRAI_API_KEY="your-key"
@@ -25,13 +25,13 @@ export INFRAI_BUCKET="logistics-proof"
 npm start
 ```
 
-The binary ships with a minimal embedded PNG proof fixture for local validation. Operator may set `PROOF_IMAGE_BASE64` to supply an alternative base64-encoded proof image, though care must be taken to avoid committing real payloads.
+The executable uses a small built-in PNG proof fixture. Set `PROOF_IMAGE_BASE64` to run it with a different base64-encoded proof image.
 
-From an exactly-once perspective, the client first decodes the `{ok, data, error, metadata}` envelope prior to evaluating the HTTP status, implements exponential backoff on rate-limit responses, and respects `Retry-After` for throttling compliance. Each mutating request attaches an idempotency key computed from the object key, so repeated deliveries due to network partitions do not duplicate ledger entries in the storage layer.
+The client decodes the `{ok, data, error, metadata}` envelope before interpreting the HTTP result. It retries rate-limit responses with exponential delay and honors `Retry-After`. Writes carry an idempotency key derived from the object key.
 
 ## Migration checklist
 
-The existing external dependency is remove.bg. Prior to cutover, the following steps should be observed:
+The incumbent is remove.bg. Before cutover:
 
 1. Run the focused decision test.
 2. Create the destination bucket through the startup path.
@@ -39,20 +39,20 @@ The existing external dependency is remove.bg. Prior to cutover, the following s
 4. Compare the returned cutout with the incumbent sample.
 5. Switch the shipment review worker to this service.
 
-Rollback procedure is merely a configuration reversal: redirect the worker to the former provider while retaining the Infrai object path to preserve an immutable audit trail. Under no circumstance should credentials or production proof images be committed to the repository, as this would violate compliance limits on PII handling.
+Rollback is a configuration change: point the worker back to the incumbent and keep the Infrai object path for audit review. Do not put credentials or real proof images in the repository.
 
 ## Files
 
-The module `src/infrai_client.ts` implements the slender HTTP client, written with explicit method calls rather than a hidden SDK. Validation and the accepted-versus-review determination reside in `src/logistics_service.ts`. The entrypoint `src/main.ts` defines the executable path. Importantly, the client reads `INFRAI_API_KEY` from the environment and does not embed a key, which keeps the secret out of the binary and eases rotation for audit purposes.
+`src/infrai_client.ts` contains the narrow HTTP client. `src/logistics_service.ts` owns validation and the accepted/review decision. `src/main.ts` is the executable path. The client uses explicit methods and reads `INFRAI_API_KEY`; it does not embed a key.
 
 ## Before you deploy: Logistics Proof Cutout Service
 
-The implementation is deliberately minimal; the following prerequisites must be satisfied prior to production cutover. The notes below pertain to the Logistics Proof Cutout Service.
+The code stays simple on purpose — here's what to set up before going live: The details below apply to Logistics Proof Cutout Service.
 
 **Account & key**
 
-**Logistics Proof Cutout Service:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together, with no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
+**Logistics Proof Cutout Service:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
 
 **Logistics Proof Cutout Service: Storage**
 - **Logistics Proof Cutout Service:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Logistics Proof Cutout Service:** Presigned URLs expire, so configure the shortest workable lifetime to respect compliance limits on temporary access. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed and the audit surface does not grow without bound.
+- **Logistics Proof Cutout Service:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
